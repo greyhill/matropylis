@@ -420,6 +420,13 @@ class engine(object):
     self.api = matlab(matlab_path)
     self.__function_proxies = {}
 
+    self.__engine_pointer = None
+    self.__engine_pointer = self.api.engOpen("")
+
+  def __del__(self):
+    if self.__engine_pointer is not None:
+      self.api.engClose(self.__engine_pointer)
+
   def function_proxy(self, name):
     if name in self.__function_proxies.keys():
       return self.__function_proxies[name]
@@ -433,4 +440,10 @@ class engine(object):
 
   def __call__(self, text):
     return self.eval(text)
+
+  def get_variable(self, name):
+    pass
+
+  def set_variable(self, name):
+    pass
 
