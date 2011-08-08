@@ -4,7 +4,7 @@ import os.path
 
 class matlab(object):
   def __init__(self, matlab_path):
-    """Access the MATLAB C/C++ APIs.
+    """Access the MATLAB C API.
 
     This class provides raw access to the C/C++ APIs.  It'll probably be
     more helpful to use a higher-level object.  Also provides some
@@ -15,6 +15,26 @@ class matlab(object):
     self.matlab_path = matlab_path
 
     self.__setup_ctypes()
+
+    # define some helpers for conversion
+    import numpy as np
+    self.__matlab2numpy = { self.mxLOGICAL_CLASS: np.bool,
+        self.mxCHAR_CLASS: ct.c_char,
+        self.mxDOUBLE_CLASS: ct.c_double,
+        self.mxSINGLE_CLASS: ct.c_float,
+        self.mxINT8_CLASS: ct.c_int8,
+        self.mxUINT8_CLASS: ct.c_uint8,
+        self.mxINT16_CLASS: ct.c_int16,
+        self.mxUINT16_CLASS: ct.c_uint16,
+        self.mxINT32_CLASS: ct.c_int32,
+        self.mxUINT32_CLASS: ct.c_uint32,
+        self.mxINT64_CLASS: ct.c_int64,
+        self.mxUINT64_CLASS: ct.c_uint64 }
+    self.__numpy2matlab = { v:k for (k,v) in 
+        self.__matlab2numpy.items() }
+
+  def classID_to_dtype(self, classID):
+    return self.__matlab2numpy[classID]
 
   def __arch(self):
     mexext_path = os.path.sep.join( \
@@ -84,7 +104,7 @@ class matlab(object):
   def __setup_mx(self, arch):
     mx_dll_path = os.path.sep.join( \
         (self.matlab_path, "bin", arch,
-        "libmat.so" ) )
+        "libmx.so" ) )
     self.__mx = ct.cdll.LoadLibrary(mx_dll_path)
 
     # a few enumerations (optimistic guesses from the header files)
@@ -115,6 +135,10 @@ class matlab(object):
     self.mxOBJECT_CLASS = 18
 
     # many, many function bindings
+
+    self.mxIsComplex = self.__mx.mxIsComplex
+    self.mxIsComplex.restype = ct.c_bool
+    self.mxIsComplex.argtypes = [ ct.c_void_p ]
 
     self.mxAddField = self.__mx.mxAddField
     self.mxAddField.restype = ct.c_int
@@ -419,13 +443,21 @@ class engine(object):
     """
     self.api = matlab(matlab_path)
     self.__function_proxies = {}
+    self.__mat2py_converters = {}
 
     self.__engine_pointer = None
     self.__engine_pointer = self.api.engOpen("")
 
+    self.__tmp_num = 0
+
   def __del__(self):
     if self.__engine_pointer is not None:
       self.api.engClose(self.__engine_pointer)
+
+  def __tmp_name(self):
+    to_return = "matropylis_tmp%d" % self.__tmp_num
+    self.__tmp_num += 1
+    return to_return
 
   def function_proxy(self, name):
     if name in self.__function_proxies.keys():
@@ -436,13 +468,129 @@ class engine(object):
       return f
 
   def eval(self, text):
-    pass
+    self.api.engEvalString(self.__engine_pointer, text)
 
   def __call__(self, text):
     return self.eval(text)
 
   def get_variable(self, name):
-    pass
+    # first, we want to know about they variable we're pulling across.
+    # sadly, at this level we can't rely on the nice function_proxy
+    # machinery 
+    tmp_name = self.__tmp_name()
+    self.eval("%s = whos('%s')" % (tmp_name, name))
+
+    whos_ptr = None
+    class_name_ptr = None
+    try:
+      whos_ptr = self.api.engGetVariable(self.__engine_pointer, tmp_name)
+
+      # the most important part about the whos structure is the "class"
+      # field, which contains a text version of the class of the object 
+      # we're trying to pull across, e.g., "double" or "function_handle"
+      field_num = self.api.mxGetFieldNumber(whos_ptr, "class")
+      class_name_ptr = self.api.mxGetFieldByNumber(whos_ptr, 0,
+          field_num)
+
+      num_chars = self.api.mxGetNumberOfElements(class_name_ptr)
+
+      name_buf_class = ct.c_char * (num_chars + 1)
+      name_buf = name_buf_class()
+
+      self.api.mxGetString(class_name_ptr, name_buf, num_chars+1)
+      class_name = name_buf.value
+
+      return self.__get_variable_with_class_name(name, class_name)
+    except Exception, e:
+      raise e
+    finally:
+      if whos_ptr is not None and whos_ptr != 0:
+        self.api.mxDestroyArray(whos_ptr)
+
+  def __get_variable_with_class_name(self, var_name, class_name):
+    # check for special handlers
+    if class_name in self.__mat2py_converters:
+      return self.__mat2py_converters[class_name](var_name, class_name)
+    else:
+      if class_name == "function_handle":
+        raise Exception("function handles not supported right now...")
+      else:
+        return self.__get_variable_normal(var_name, class_name)
+
+  def __get_variable_normal(self, var_name, class_name):
+    # handler for loading dense and sparse arrays of fundamental types
+    ptr = None
+    try:
+      ptr = self.api.engGetVariable(self.__engine_pointer, var_name)
+
+      # get a bit of helpful info:
+      # - sparsity:
+      is_sparse = self.api.mxIsSparse(ptr)
+
+      # - dimensions:
+      num_dimensions = self.api.mxGetNumberOfDimensions(ptr)
+      dims_buf = self.api.mxGetDimensions(ptr)
+      dims = [ dims_buf[i] for i in xrange(num_dimensions) ]
+      dims = tuple(dims)
+
+      # - classID, numpy datatype
+      classID = self.api.mxGetClassID(ptr)
+      numpy_dtype = self.api.classID_to_dtype(classID)
+
+      # - real/complex?
+      is_complex = self.api.mxIsComplex(ptr)
+
+      if is_sparse:
+        # sparse
+        from scipy.sparse import csc_matrix
+        import numpy as np
+
+        row_ind_ptr = self.api.mxGetIr(ptr)
+        col_ptr = self.api.mxGetJc(ptr)
+        data_addr = self.api.mxGetData(ptr)
+
+        num_entries = self.api.mxGetNzmax(ptr)
+        sparse_shape = (num_entries,)
+        
+        data_ptr = ct.pointer(numpy_dtype.from_address(data_addr))
+
+        row_ind = np.ctypeslib.as_array(row_ind_ptr, shape=sparse_shape)
+        row_ind = np.array(row_ind, dtype=np.int, copy=True)
+        col = np.ctypeslib.as_array(col_ptr, shape=(dims[1]+1,))
+        col = np.array(col, dtype=np.int, copy=True)
+        col[-1] = num_entries
+        data = np.ctypeslib.as_array(data_ptr,
+            shape=sparse_shape).copy()
+
+        if is_complex:
+          imag_addr = self.api.mxGetImagData(ptr)
+          imag_ptr = ct.pointer(numpy_dtype.from_address(imag_addr))
+          imag = np.ctypeslib.as_array(imag_ptr,
+              shape=sparse_shape).copy()
+          data = data + 1j*imag
+
+        return csc_matrix( (data, row_ind, col), dims )
+
+      else:
+        # dense
+        import numpy as np
+
+        real_addr = self.api.mxGetData(ptr)
+        real_ptr = ct.pointer(numpy_dtype.from_address(real_addr))
+        real = np.ctypeslib.as_array(real_ptr, shape=dims)
+
+        if is_complex:
+          imag_addr = self.api.mxGetImagData(ptr)
+          imag_ptr = ct.pointer(numpy_dtype.from_address(imag_addr))
+          imag = np.ctypeslib.as_array(imag_ptr, shape=dims)
+          real = 1j*imag + real
+
+        return np.array(real, order="F", copy=True)
+    except Exception, e:
+      raise e
+    finally:
+      if ptr is not None and ptr != 0:
+        self.api.mxDestroyArray(ptr)
 
   def set_variable(self, name):
     pass
