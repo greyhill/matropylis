@@ -495,21 +495,32 @@ class engine_function_proxy(object):
             return ord(bytecode[i + 1])
         return 0
 
-  def __call__(self, *args):
+  def __call__(self, *args, **kwargs):
+    """Call a MATLAB function or invoke a function handle.
+
+    The optional keyword argument "proxy" can be set to True in order to
+    return proxies to all returned variables instead of copying over the
+    variable to Python completely.
+
+    """
     nargout = self.__expecting()
 
-    # get a list of temporary names for the arguments and copy them
-    # across to MATLAB
-    temp_names = [ self.engine.temp_name() for arg in args ]
-    for (temp_name, arg) in zip(temp_names, args):
-      self.engine.set_variable(temp_name, arg)
+    # copy over non-proxy objects; use proxy objects as expected
+    var_names = []
+    for arg in args:
+      if hasattr(arg, "matlab_name"):
+        var_names.append(arg.matlab_name)
+      else:
+        temp_name = self.engine.temp_name()
+        var_names.append(temp_name)
+        self.engine.set_variable(temp_name, arg)
 
     # get a list of temporary names for the return values
     out_names = [ self.engine.temp_name() for i in xrange(nargout) ]
 
     # make the call
     out_names_str = ", ".join(out_names)
-    in_names_str = ", ".join(temp_names)
+    in_names_str = ", ".join(var_names)
     eval_str = None
     if nargout > 0:
       eval_str =  "[%s] = %s(%s);" % (out_names_str, self.name, in_names_str)
@@ -518,14 +529,30 @@ class engine_function_proxy(object):
     self.engine(eval_str)
 
     # get results from MATLAB and return
-    to_return = tuple([ self.engine.get_variable(argname) \
-        for argname in out_names ])
+    to_return = None
+    if "proxy" in kwargs.keys() and kwargs["proxy"]:
+      to_return = tuple([ self.engine.get_proxy(argname) \
+          for argname in out_names ])
+    else:
+      to_return = tuple([ self.engine.get_variable(argname) \
+          for argname in out_names ])
     if nargout == 0:
       return
     elif nargout == 1:
       return to_return[0]
     else:
       return to_return
+
+class engine_object_proxy(object):
+  def __init__(self, engine, matlab_name):
+    self.__engine = engine
+    self.__matlab_name = matlab_name
+
+  def get(self):
+    return self.__engine.get_variable(self.__matlab_name)
+
+  def __get_matlab_name(self): return self.__matlab_name
+  matlab_name = property(__get_matlab_name)
 
 class engine(object):
   def __init__(self, matlab_path):
@@ -547,6 +574,9 @@ class engine(object):
     self.register_mat2py_converter("function_handle",
         self.__mat2py_func)
     self.register_mat2py_converter("strum", self.__mat2py_strum)
+    self.register_mat2py_converter("fatrix", self.__mat2py_fatrix)
+
+    self.__start_callback_server()
 
   def __del__(self):
     if self.__engine_pointer is not None:
@@ -601,6 +631,7 @@ class engine(object):
     # across all at once, but we would lose type checking.  instead, we
     # resort to the (possibly less satisfying) process of recursively
     # pushing across variables
+
     raise Exception("not implemented")
     pass
 
@@ -768,16 +799,73 @@ class engine(object):
         self.api.mxDestroyArray(whos_ptr)
 
   def __mat2py_strum(self, var_name, class_name):
+    class strum(object):
+      def __init__(self, strum_members):
+        self.strum_members = strum_members
+
+        # setup stuff in meth
+        for (k, v) in self.strum_members["meth"].items():
+          setattr(self, k, v)
+
     assert(class_name == "strum")
     tmp_name = self.temp_name()
     self("%s = struct(%s);" % (tmp_name, var_name))
-    to_return = self.get_variable(tmp_name)
-    # mark this as a strum ... ?
+    strum_members = self.get_variable(tmp_name)
+    to_return = strum(strum_members)
+
+    return to_return
+
+  def __mat2py_fatrix(self, var_name, class_name):
+    class fatrix(object):
+      def __init__(self, engine, fatrix_members, is_transpose):
+        self.fatrix_members = fatrix_members
+        self.is_transpose = is_transpose
+        self.engine = engine
+        self.var_name = var_name
+
+      def forward(self, other):
+        tmp_name_in = self.engine.temp_name()
+        tmp_name_out = self.engine.temp_name()
+        self.engine.set_variable(tmp_name_in, other)
+        self.engine("%s = %s*%s;" % (tmp_name_out, self.var_name, tmp_name_in))
+        return self.engine.get_variable(tmp_name_out)
+
+      def back(self, other):
+        tmp_name_in = self.engine.temp_name()
+        tmp_name_out = self.engine.temp_name()
+        self.engine.set_variable(tmp_name_in, other)
+        self.engine("%s = %s'*%s;" % (tmp_name_out, self.var_name, tmp_name_in))
+        return self.engine.get_variable(tmp_name_out)
+
+      def __call__(self, other):
+        if not self.is_transpose:
+          return self.forward(other)
+        else:
+          return self.back(other)
+
+      def __mul__(self, other):
+        return self(other)
+        
+      def transpose(self):
+        return fatrix(self.fatrix_members, not is_transpose)
+
+      T = property(transpose)
+
+    assert(class_name == "fatrix")
+    tmp_name = self.temp_name()
+    self("%s = struct(%s);" % (tmp_name, var_name))
+    fatrix_members = self.get_variable(tmp_name)
+    to_return = fatrix(self, fatrix_members, is_transpose=False)
+
     return to_return
 
   def __get_variable_with_class_name(self, var_name, class_name):
-    print var_name, class_name
     # check for special handlers
+    class_name = class_name.lower()
+
+    # ??? inline vs function_handle ???
+    if class_name == "inline": class_name = "function_handle"
+
     if class_name in self.__mat2py_converters:
       return self.__mat2py_converters[class_name](var_name, class_name)
     else:
@@ -838,7 +926,6 @@ class engine(object):
         field_name = self.get_variable(field_tmp_name)
 
         field_data_tmp_name = self.temp_name()
-        print "getting %s" % field_name
         self("%s = %s.%s" % (field_data_tmp_name, var_name, field_name))
         to_return[field_name] = self.get_variable(field_data_tmp_name)
 
@@ -938,7 +1025,6 @@ class engine(object):
         real_addr = self.api.mxGetData(ptr)
         if real_addr == None:
           # we attempted to get an empty array
-          print "empty"
           return np.empty(dtype=numpy_dtype, shape=())
 
         real_ptr = ct.pointer(numpy_dtype.from_address(real_addr))
@@ -960,4 +1046,24 @@ class engine(object):
     finally:
       if ptr is not None and ptr != 0:
         self.api.mxDestroyArray(ptr)
+
+  def get_proxy(self, var_name):
+    """Returns a lightweight object that "proxies" an object in MATLAB.
+
+    This function returns a lightweight object that simply stores the
+    name of a MATLAB object for passing to MATLAB functions later.  The
+    actual object is not transferred from MATLAB to Python.  Proxies are
+    helpful for handling data that will never need to be directly access
+    from Python in a more Pythonic fashion.
+
+    No check is made to ensure that the given variable name is valid in
+    the MATLAB workspace.  Things could explore horribly upon misuse.
+    
+    """
+    return engine_object_proxy(self, var_name)
+
+  def __start_callback_server(self):
+    # notion -- this gives us a tool to make Python functions available
+    # from MATLAB
+    pass
 
