@@ -564,8 +564,10 @@ class engine(object):
     self.__mat2py_converters = {}
     self.__py2mat_converters = {}
 
+    matlab_binary = os.path.sep.join([ matlab_path, "bin", "matlab" ])
     self.__engine_pointer = None
-    self.__engine_pointer = self.api.engOpen("")
+    self.__engine_pointer = self.api.engOpen("%s -nosplash" % \
+        matlab_binary)
 
     self.__tmp_num = 0
 
