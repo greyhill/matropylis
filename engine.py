@@ -503,7 +503,11 @@ class engine_function_proxy(object):
     variable to Python completely.
 
     """
-    nargout = self.__expecting()
+    nargout = None
+    if "nargout" in kwargs.keys():
+      nargout = kwargs["nargout"]
+    else:
+      nargout = self.__expecting()
 
     # copy over non-proxy objects; use proxy objects as expected
     var_names = []
