@@ -3,6 +3,8 @@ matropylis -- version 0.0.0.0.0....1
 
 This is a ctypes-based MATLAB/python interop library.
 
+It requires at least numpy 1.5.
+
 The code is available under the LGPL version 2.
 
 Copyright Madison McGaffin <greyhill@gmail.com>
