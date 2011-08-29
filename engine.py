@@ -853,7 +853,7 @@ class engine(object):
         return self(other)
         
       def transpose(self):
-        return fatrix(self.fatrix_members, not is_transpose)
+        return fatrix(self.fatrix_members, not self.is_transpose)
 
       T = property(transpose)
 
