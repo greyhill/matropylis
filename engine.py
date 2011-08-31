@@ -502,6 +502,11 @@ class engine_function_proxy(object):
     return proxies to all returned variables instead of copying over the
     variable to Python completely.
 
+    The optional keyword argument nargout can be set to the number of
+    expected outputs from the function.  By default, Matropylis attempts
+    to infer the number of output arguments via bytecode introspection,
+    but this has been known to fail from time to time.
+
     """
     nargout = None
     if "nargout" in kwargs.keys():
@@ -1059,8 +1064,8 @@ class engine(object):
     This function returns a lightweight object that simply stores the
     name of a MATLAB object for passing to MATLAB functions later.  The
     actual object is not transferred from MATLAB to Python.  Proxies are
-    helpful for handling data that will never need to be directly access
-    from Python in a more Pythonic fashion.
+    helpful for handling data that will never need to be directly
+    accessed from Python in a more Pythonic fashion.
 
     No check is made to ensure that the given variable name is valid in
     the MATLAB workspace.  Things could explore horribly upon misuse.
