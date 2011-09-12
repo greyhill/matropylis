@@ -773,7 +773,10 @@ class engine(object):
     # we couldn't find a way to make the conversion to MATLAB... :-(
     raise TypeError("couldn't convert '%s' to MATLAB" % value)
 
-  def get_variable(self, name):
+  def get_variable(self, name, proxy=False):
+    # shortcut/consistency
+    if proxy: return self.get_proxy(name)
+
     # first, we want to know about they variable we're pulling across.
     # sadly, at this level we can't rely on the nice function_proxy
     # machinery 
@@ -816,18 +819,29 @@ class engine(object):
 
   def __mat2py_strum(self, var_name, class_name):
     class strum(object):
-      def __init__(self, strum_members):
+      def __init__(self, strum_proxy, strum_members):
         self.strum_members = strum_members
 
         # setup stuff in meth
         for (k, v) in self.strum_members["meth"].items():
+          def make_wrapper(val):
+            def strum_func_wrapper(*args, **kwargs):
+              if "nargout" not in kwargs.keys():
+                return val(strum_proxy, *args, nargout=1, **kwargs)
+              else:
+                return val(strum_proxy, *args, **kwargs)
+            return strum_func_wrapper
+          setattr(self, k, make_wrapper(v))
+
+        for (k, v) in self.strum_members["data"].items():
           setattr(self, k, v)
 
     assert(class_name == "strum")
     tmp_name = self.temp_name()
     self("%s = struct(%s);" % (tmp_name, var_name))
     strum_members = self.get_variable(tmp_name)
-    to_return = strum(strum_members)
+    strum_proxy = self.get_variable(var_name, proxy=True)
+    to_return = strum(strum_proxy, strum_members)
 
     return to_return
 
@@ -880,7 +894,8 @@ class engine(object):
     class_name = class_name.lower()
 
     # ??? inline vs function_handle ???
-    if class_name == "inline": class_name = "function_handle"
+    if class_name == "inline": 
+      class_name = "function_handle"
 
     if class_name in self.__mat2py_converters:
       return self.__mat2py_converters[class_name](var_name, class_name)
