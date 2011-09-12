@@ -785,6 +785,11 @@ class engine(object):
     try:
       whos_ptr = self.api.engGetVariable(self.__engine_pointer, tmp_name)
 
+      # check that the result size is reasonable
+      whos_size_ptr = self.api.mxGetDimensions(whos_ptr)
+      if whos_size_ptr[0] < 1:
+        raise Exception("variable %s doesn't exist in MATLAB" % name)
+
       # the most important part about the whos structure is the "class"
       # field, which contains a text version of the class of the object 
       # we're trying to pull across, e.g., "double" or "function_handle"
@@ -802,8 +807,8 @@ class engine(object):
 
       return self.__get_variable_with_class_name(name, class_name)
     except Exception, e:
-      import traceback
-      traceback.print_exc()
+      #import traceback
+      #traceback.print_exc()
       raise e
     finally:
       if whos_ptr is not None and whos_ptr != 0:
