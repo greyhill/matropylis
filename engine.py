@@ -586,6 +586,7 @@ class engine(object):
         self.__mat2py_func)
     self.register_mat2py_converter("strum", self.__mat2py_strum)
     self.register_mat2py_converter("fatrix", self.__mat2py_fatrix)
+    self.register_mat2py_converter("fatrix2", self.__mat2py_fatrix)
 
     self.__start_callback_server()
 
@@ -880,8 +881,9 @@ class engine(object):
         return fatrix(self.engine, self.fatrix_members, not self.is_transpose)
 
       T = property(transpose)
+      t = property(transpose)
 
-    assert(class_name == "fatrix")
+    assert(class_name == "fatrix" or class_name == "fatrix2")
     tmp_name = self.temp_name()
     self("%s = struct(%s);" % (tmp_name, var_name))
     fatrix_members = self.get_variable(tmp_name)
